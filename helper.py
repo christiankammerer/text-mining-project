@@ -1,6 +1,11 @@
 import requests as req # http requests
 from lxml import etree # xml parsing
 from typing import Tuple
+import re
+import json
+
+with open('government_officials.json') as json_file:
+    government_officials = json.load(json_file)
 
 class Party:
     def __init__(self, name: str, abbreviation: str):
@@ -19,6 +24,10 @@ class Party:
 
 class Speaker:
     def __init__(self, id: str, first_name: str, last_name: str, party: str):
+        if party == "" :
+            full_name = f"{first_name} {last_name}".strip()
+            if full_name in government_officials:
+                party = government_officials[full_name]
         self.id = id
         self.first_name = first_name
         self.last_name = last_name
@@ -53,26 +62,105 @@ class Speech:
         self.speaker_id = speaker_id
         self.session_id = session_id
         self.text = text
-
-    def split_into_parts(self, max_length: int) -> list[str]:
-        words = self.text.split()
-        parts = []
-        current_part = []
-
-        for word in words:
-            # Check if adding the next word would exceed the max length
-            if len(' '.join(current_part + [word])) <= max_length:
-                current_part.append(word)
+        self.emotions = {}
+        self.topics = {}
+    
+    def split_by_sentences(self, max_words: int = 400) -> list[str]:
+        """
+        Split speech text into chunks by sentences, using word count as proxy.
+        Conservative limit to ensure tokenized length stays under 512.
+        
+        Args:
+            max_words: Maximum words per chunk (default 400 for ~500 tokens buffer)
+            
+        Returns:
+            List of text chunks, each within word limit
+        """
+        
+        if not self.text:
+            return []
+        
+        # Split on sentence boundaries
+        sentences = re.split(r'(?<=[.!?])\s+', self.text)
+        
+        chunks = []
+        current_chunk = []
+        current_word_count = 0
+        
+        for sentence in sentences:
+            sentence_words = len(sentence.split())
+            
+            # Check if adding this sentence would exceed limit
+            if current_word_count + sentence_words > max_words:
+                if current_chunk:
+                    chunks.append(' '.join(current_chunk))
+                current_chunk = [sentence]
+                current_word_count = sentence_words
             else:
-                # If it would exceed, save the current part and start a new one
-                parts.append(' '.join(current_part))
-                current_part = [word]
-
-        # Add any remaining words as the last part
-        if current_part:
-            parts.append(' '.join(current_part))
-
-        return parts
+                current_chunk.append(sentence)
+                current_word_count += sentence_words
+        
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+        
+        return chunks
+    
+    def analyze_speech(self, emotion_pipeline, topic_pipeline) -> tuple[dict[str, float], dict[str, float]]:
+        """
+        Analyze emotions and topics in the speech using transformers pipelines.
+        Results are aggregated and weighted by chunk length.
+        
+        Args:
+            emotion_pipeline: Hugging Face text-classification pipeline for emotions
+            topic_pipeline: Hugging Face text-classification pipeline for topics
+            
+        Returns:
+            Tuple of (emotions_dict, topics_dict) with labels as keys and weighted scores as values
+        """
+        if not self.text:
+            self.emotions = {}
+            self.topics = {}
+            return self.emotions, self.topics
+        
+        # Split text into manageable chunks (by word count)
+        chunks = self.split_by_sentences(max_words=350)
+        
+        # Analyze each chunk - pipeline handles tokenization with truncation
+        emotion_totals = {}
+        topic_totals = {}
+        total_words = 0
+        
+        for chunk in chunks:
+            chunk_length = len(chunk.split())
+            total_words += chunk_length
+            
+            # Pipeline tokenizes internally with automatic truncation
+            emotion_results = emotion_pipeline(chunk, truncation=True, max_length=512)
+            topic_results = topic_pipeline(chunk, truncation=True, max_length=512)
+            
+            # Aggregate emotions weighted by chunk length
+            for result in emotion_results:
+                emotion = result['label']
+                score = result['score']
+                emotion_totals[emotion] = emotion_totals.get(emotion, 0) + (score * chunk_length)
+            
+            # Aggregate topics weighted by chunk length
+            for result in topic_results:
+                topic = result['label']
+                score = result['score']
+                topic_totals[topic] = topic_totals.get(topic, 0) + (score * chunk_length)
+        
+        # Normalize by total word count to get weighted average
+        if total_words > 0:
+            self.emotions = {emotion: total / total_words 
+                           for emotion, total in emotion_totals.items()}
+            self.topics = {topic: total / total_words 
+                         for topic, total in topic_totals.items()}
+        else:
+            self.emotions = {}
+            self.topics = {}
+        
+        return self.emotions, self.topics
 
 class Protocol:
     def __init__(self, data: dict):
@@ -133,6 +221,7 @@ class Protocol:
         first_name = vorname.text if vorname is not None and vorname.text else ""
         last_name = nachname.text if nachname is not None and nachname.text else ""
         party = fraktion.text if fraktion is not None and fraktion.text else ""
+        party = party.replace(r'\s+', ' ').strip()
             
         speaker = Speaker(
             id = speaker_element.get("id") or "",
