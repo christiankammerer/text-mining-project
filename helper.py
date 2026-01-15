@@ -63,7 +63,6 @@ class Speech:
         self.session_id = session_id
         self.text = text
         self.emotions = {}
-        self.topics = {}
     
     def split_by_sentences(self, max_words: int = 400) -> list[str]:
         """
@@ -105,29 +104,26 @@ class Speech:
         
         return chunks
     
-    def analyze_speech(self, emotion_pipeline, topic_pipeline) -> tuple[dict[str, float], dict[str, float]]:
+    def analyze_speech(self, emotion_pipeline) -> dict[str, float]:
         """
-        Analyze emotions and topics in the speech using transformers pipelines.
+        Analyze emotions in the speech using transformers pipeline.
         Results are aggregated and weighted by chunk length.
         
         Args:
             emotion_pipeline: Hugging Face text-classification pipeline for emotions
-            topic_pipeline: Hugging Face text-classification pipeline for topics
             
         Returns:
-            Tuple of (emotions_dict, topics_dict) with labels as keys and weighted scores as values
+            Dictionary with emotion labels as keys and weighted scores as values
         """
         if not self.text:
             self.emotions = {}
-            self.topics = {}
-            return self.emotions, self.topics
+            return self.emotions
         
         # Split text into manageable chunks (by word count)
         chunks = self.split_by_sentences(max_words=350)
         
         # Analyze each chunk - pipeline handles tokenization with truncation
         emotion_totals = {}
-        topic_totals = {}
         total_words = 0
         
         for chunk in chunks:
@@ -136,31 +132,21 @@ class Speech:
             
             # Pipeline tokenizes internally with automatic truncation
             emotion_results = emotion_pipeline(chunk, truncation=True, max_length=512)
-            topic_results = topic_pipeline(chunk, truncation=True, max_length=512)
             
             # Aggregate emotions weighted by chunk length
             for result in emotion_results:
                 emotion = result['label']
                 score = result['score']
                 emotion_totals[emotion] = emotion_totals.get(emotion, 0) + (score * chunk_length)
-            
-            # Aggregate topics weighted by chunk length
-            for result in topic_results:
-                topic = result['label']
-                score = result['score']
-                topic_totals[topic] = topic_totals.get(topic, 0) + (score * chunk_length)
         
         # Normalize by total word count to get weighted average
         if total_words > 0:
             self.emotions = {emotion: total / total_words 
                            for emotion, total in emotion_totals.items()}
-            self.topics = {topic: total / total_words 
-                         for topic, total in topic_totals.items()}
         else:
             self.emotions = {}
-            self.topics = {}
         
-        return self.emotions, self.topics
+        return self.emotions
 
 class Protocol:
     def __init__(self, data: dict):
@@ -174,6 +160,10 @@ class Protocol:
             self.xml_link = fundstelle.get("xml_url")
         else:
             raise ValueError("No fundstelle found in protocol data, cannot fetch XML")
+        
+        if not self.xml_link:
+            raise ValueError(f"No XML URL found for protocol {self.id}")
+        
         self.xml_content = self.fetch_xml()
         self.session_nr: str = ""
         
